@@ -319,6 +319,16 @@ class DOMHandler {
         /** @type {boolean} Whether the user manually toggled light/dark text */
         this.userPickedLightText = false;
 
+        /** @type {Map<string, string>} Cache for raw base64 and tinted brand logos */
+        this.brandLogoCache = new Map();
+        this.rawLogoCache = new Map();
+        this.base64Cache = new Map();
+
+        /** @type {Promise|null} Cover and color preparation tracking */
+        this.coverPreparationPromise = null;
+        this.preparedCoverUrl = null;
+        this.brandLogosPromise = null;
+
         this.populateColorSelection();
         this.setupShareButton();
         this.setListeners();
@@ -605,6 +615,9 @@ class DOMHandler {
 
         /** @type {Song} */
         const song = this.songs[this.selectedSongIndex];
+        if (song?.albumCoverUrl) {
+            this.preloadSongCover(song.albumCoverUrl);
+        }
 
         const artists = [...new Set(song.artists.map((artist) => artist.name))];
         const controllers = artists.map(() => new AbortController());
@@ -759,6 +772,36 @@ class DOMHandler {
     }
 
     /**
+     * Preloads and prepares the album cover (base64, vibrant color, and blurred wash)
+     * as soon as a song is picked in screen 2, so screen 4 renders instantly.
+     * @param {string} url
+     * @returns {Promise<{base64: string, color: string, blurred: object}|null>}
+     */
+    preloadSongCover(url) {
+        if (!url) return Promise.resolve(null);
+        if (this.coverPreparationPromise && this.preparedCoverUrl === url) {
+            return this.coverPreparationPromise;
+        }
+
+        this.preparedCoverUrl = url;
+        this.coverPreparationPromise = (async () => {
+            try {
+                const base64 = await this.fetchAsBase64(url);
+                const [color, blurred] = await Promise.all([
+                    this.extractVibrantColor(base64),
+                    this.generateBlurredCover(base64),
+                ]);
+                return { base64, color, blurred };
+            } catch (err) {
+                console.warn("Cover preloading failed:", err);
+                return null;
+            }
+        })();
+
+        return this.coverPreparationPromise;
+    }
+
+    /**
      * Loads the album cover into the card (as base64 to dodge CORS) and,
      * once decoded, extracts the dominant vibrant color and generates a
      * blurred version of the artwork used as the Apple Music background.
@@ -766,17 +809,14 @@ class DOMHandler {
      */
     async setSongCoverAndExtractColor(url) {
         try {
-            const base64 = await this.fetchAsBase64(url);
-            this.songImageCover.setAttribute("src", base64);
-
-            const [color, blurred] = await Promise.all([
-                this.extractVibrantColor(base64),
-                this.generateBlurredCover(base64),
-            ]);
-            this.dominantColor = color;
-            this.blurredCover = blurred;
-            this.applyDominantBackground();
-            this.applyAppleMusicBackground();
+            const prep = await this.preloadSongCover(url);
+            if (prep && prep.base64) {
+                this.songImageCover.setAttribute("src", prep.base64);
+                this.dominantColor = prep.color;
+                this.blurredCover = prep.blurred;
+                this.applyDominantBackground();
+                this.applyAppleMusicBackground();
+            }
         } catch (error) {
             console.warn("Cover load / color extraction failed:", error);
         }
@@ -878,10 +918,14 @@ class DOMHandler {
      * are loaded as base64 (so html2canvas can export them) and re-painted
      * to grayscale with the given channel value (0 = black, 255 = white).
      * @param {number} channel
+     * @returns {Promise<void>}
      */
     tintBrandLogos(channel) {
-        this.setBase64Image(SPOTIFY_LOGO, SPOTIFY_LOGO_SELECTOR, channel);
-        this.setBase64Image(APPLE_LOGO, APPLE_GLYPH_SELECTOR, channel);
+        this.brandLogosPromise = Promise.all([
+            this.setBase64Image(SPOTIFY_LOGO, SPOTIFY_LOGO_SELECTOR, channel),
+            this.setBase64Image(APPLE_LOGO, APPLE_GLYPH_SELECTOR, channel),
+        ]);
+        return this.brandLogosPromise;
     }
 
     /**
@@ -896,20 +940,24 @@ class DOMHandler {
 
     /**
      * Fetches a remote image and resolves to its base64 data URL.
-     * Mirrors the fetch step in setBase64Image so we can also pass the
-     * data into image processing without re-fetching.
+     * Caches in-memory so subsequent requests resolve instantly.
      * @param {string} url
      * @returns {Promise<string>}
      */
     async fetchAsBase64(url) {
+        if (this.base64Cache.has(url)) {
+            return this.base64Cache.get(url);
+        }
         const response = await fetch(url);
         const blob = await response.blob();
-        return new Promise((resolve, reject) => {
+        const base64 = await new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onloadend = () => resolve(reader.result);
             reader.onerror = reject;
             reader.readAsDataURL(blob);
         });
+        this.base64Cache.set(url, base64);
+        return base64;
     }
 
     /**
@@ -1194,12 +1242,52 @@ class DOMHandler {
 
     /**
      * Generates a canvas from the current song image DOM element.
+     * Ensures all fonts, covers, and logos are ready before rendering,
+     * and uses an optimal high-density scale (2x-3x) instead of multiplying DPR by 4.
      * @returns {Promise<HTMLCanvasElement>}
      */
     async getSongImageCanvas() {
+        if (document.fonts?.ready) {
+            await document.fonts.ready;
+        }
+
+        if (this.coverPreparationPromise) {
+            await this.coverPreparationPromise;
+        }
+
+        if (this.brandLogosPromise) {
+            await this.brandLogosPromise;
+        }
+
+        const visibleImgs = Array.from(
+            this.songImage.querySelectorAll("img")
+        ).filter(
+            (img) =>
+                img.offsetParent !== null ||
+                window.getComputedStyle(img).display !== "none"
+        );
+        await Promise.all(
+            visibleImgs.map((img) => {
+                if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+                return new Promise((resolve) => {
+                    img.onload = img.onerror = resolve;
+                });
+            })
+        );
+
+        const scale = Math.min(3, Math.max(2, window.devicePixelRatio || 2));
         let canvas = await html2canvas(this.songImage, {
             backgroundColor: null,
-            scale: window.devicePixelRatio * DOWNLOAD_SCALING_FACTOR,
+            scale,
+            useCORS: true,
+            logging: false,
+            imageTimeout: 4000,
+            ignoreElements: (element) => {
+                return (
+                    element.classList.contains("brand-logo") &&
+                    window.getComputedStyle(element).display === "none"
+                );
+            },
         });
 
         return canvas;
@@ -1224,55 +1312,78 @@ class DOMHandler {
     }
 
     /**
-     * Converts cover image to base64 and sets it as image's source in order to avoid canvas CORS policy
+     * Converts cover or logo image to base64 and sets it as image's source in order to avoid canvas CORS policy.
+     * Caches raw SVG/base64 and tinted canvas data URLs so repeated calls are instant and offline-friendly.
      * @param {string} url
      * @param {string} imgSelector
+     * @param {number|null} newColor
+     * @returns {Promise<string>}
      */
     async setBase64Image(url, imgSelector, newColor = null) {
-        const response = await fetch(url);
-        const blob = await response.blob();
+        const cacheKey = `${url}_${newColor}`;
+        if (this.brandLogoCache.has(cacheKey)) {
+            const cached = this.brandLogoCache.get(cacheKey);
+            const el = document.querySelector(imgSelector);
+            if (el) el.setAttribute("src", cached);
+            return cached;
+        }
 
-        const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
+        let base64 = this.rawLogoCache.get(url);
+        if (!base64) {
+            const response = await fetch(url);
+            const blob = await response.blob();
+            base64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+            this.rawLogoCache.set(url, base64);
+        }
 
-        if (newColor === null)
-            return document
-                .querySelector(imgSelector)
-                .setAttribute("src", base64);
+        if (newColor === null) {
+            const el = document.querySelector(imgSelector);
+            if (el) el.setAttribute("src", base64);
+            return base64;
+        }
 
-        const img = new Image();
-        img.src = base64;
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement("canvas");
+                const ctx = canvas.getContext("2d");
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
 
-        img.onload = () => {
-            const canvas = document.createElement("canvas");
-            const ctx = canvas.getContext("2d");
-            canvas.width = img.width;
-            canvas.height = img.height;
-            ctx.drawImage(img, 0, 0);
+                const imageData = ctx.getImageData(
+                    0,
+                    0,
+                    canvas.width,
+                    canvas.height
+                );
+                const data = imageData.data;
 
-            const imageData = ctx.getImageData(
-                0,
-                0,
-                canvas.width,
-                canvas.height
-            );
-            const data = imageData.data;
-
-            for (let i = 0; i < data.length; i += 4) {
-                if (data[i + 3] > 0) {
-                    data[i] = data[i + 1] = data[i + 2] = newColor; // Set RGB (0 = black, 255 = white)
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i + 3] > 0) {
+                        data[i] = data[i + 1] = data[i + 2] = newColor; // Set RGB (0 = black, 255 = white)
+                    }
                 }
-            }
 
-            ctx.putImageData(imageData, 0, 0);
-            document
-                .querySelector(imgSelector)
-                .setAttribute("src", canvas.toDataURL());
-        };
+                ctx.putImageData(imageData, 0, 0);
+                const dataUrl = canvas.toDataURL();
+                this.brandLogoCache.set(cacheKey, dataUrl);
+                const el = document.querySelector(imgSelector);
+                if (el) el.setAttribute("src", dataUrl);
+                resolve(dataUrl);
+            };
+            img.onerror = () => {
+                const el = document.querySelector(imgSelector);
+                if (el) el.setAttribute("src", base64);
+                resolve(base64);
+            };
+            img.src = base64;
+        });
     }
 
     /**
