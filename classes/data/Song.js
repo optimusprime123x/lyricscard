@@ -1,6 +1,6 @@
 class Song {
     /**
-     * @param {object} songInfo  Canonical shape: { spotifyTrackId, name, durationMs, artists: [{name}], albumCoverUrl }
+     * @param {object} songInfo  Canonical shape: { spotifyTrackId, name, durationMs, artists: [{name}], albumCoverUrl, isMatched, album }
      * @param {object} lyrics
      */
     constructor(songInfo, lyrics = null) {
@@ -18,6 +18,12 @@ class Song {
 
         /** @type {string|null} */
         this.albumCoverUrl = songInfo.albumCoverUrl ?? null;
+
+        /** @type {string|null} */
+        this.album = songInfo.album ?? null;
+
+        /** @type {boolean} */
+        this.isMatched = Boolean(songInfo.isMatched);
 
         /** @type {boolean} */
         this.hasSyncedLyrics = lyrics?.syncedLyrics ? true : false;

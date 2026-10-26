@@ -1,6 +1,5 @@
 const LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/";
-const PAXSENIX_BASE = "https://api.paxsenix.org/spotify/search";
-const PAXSENIX_KEY = "sk-paxsenix-y5tK4iuxRPohlXVeF_yC5Uigf7Fr5zS06rzsmMIQ6JAHcH9n";
+const SPOTSEARCH_BASE = "https://spotsearch.ananke-862.workers.dev/search";
 const USER_AGENT = "LyricPost/2.0 (https://github.com/optimuspime123/lyricscard)";
 const MAX_LIMIT = 12;
 const DEFAULT_LIMIT = 6;
@@ -14,39 +13,51 @@ function pickAlbumCover(images) {
     return null;
 }
 
-function pickLargestImage(images) {
-    if (!Array.isArray(images) || images.length === 0) return null;
-    return images[0]?.url || images[images.length - 1]?.url || null;
-}
-
-async function paxsenixCall(query, limit) {
-    const url = new URL(PAXSENIX_BASE);
+async function spotsearchCall(query, limit) {
+    const url = new URL(SPOTSEARCH_BASE);
     url.searchParams.set("q", query);
-    url.searchParams.set("limit", String(limit));
 
     const response = await fetch(url, {
         headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${PAXSENIX_KEY}`,
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
         },
     });
 
     if (!response.ok) {
-        throw new Error(`PaxSenix ${response.status}`);
+        throw new Error(`Spotsearch ${response.status}`);
     }
 
     const data = await response.json();
-    if (!data?.ok || !data?.tracks?.items) {
+    const isMatched = data?.status === "matched";
+    const bestTrack = data?.best;
+    const matchedTrackId = (isMatched && bestTrack)
+        ? (bestTrack.spotify_track_id || bestTrack.id)
+        : null;
+
+    let items = Array.isArray(data?.results) ? [...data.results] : [];
+    if (bestTrack && !items.some(t => (t.spotify_track_id || t.id) === (bestTrack.spotify_track_id || bestTrack.id))) {
+        items.unshift(bestTrack);
+    }
+
+    if (items.length === 0) {
         return [];
     }
 
-    return data.tracks.items.slice(0, limit).map(track => ({
-        spotifyTrackId: track.id || null,
-        name: track.name,
-        durationMs: track.duration_ms || 0,
-        artists: (track.artists || []).map(a => ({ name: a.name })),
-        albumCoverUrl: pickLargestImage(track.album?.images) || pickAlbumCover(track.album?.images),
-    }));
+    return items.slice(0, limit).map((track) => {
+        const trackId = track.spotify_track_id || track.id || null;
+        return {
+            spotifyTrackId: trackId,
+            name: track.title || track.name || "",
+            durationMs: Number(track.duration_ms) || 0,
+            artists: (Array.isArray(track.artists) ? track.artists : []).map((a) => ({
+                name: typeof a === "string" ? a : (a?.name || ""),
+            })),
+            albumCoverUrl: track.album_art_url || null,
+            album: track.album || null,
+            isMatched: Boolean(isMatched && matchedTrackId && trackId === matchedTrackId),
+        };
+    });
 }
 
 async function lastfmSearch(query, limit, apiKey) {
@@ -70,6 +81,7 @@ async function lastfmSearch(query, limit, apiKey) {
                     durationMs: track.duration ? Number(track.duration) : 0,
                     artists: track.artist?.name ? [{ name: track.artist.name }] : [],
                     albumCoverUrl: pickAlbumCover(track.album?.image),
+                    isMatched: false,
                 };
             } catch {
                 return null;
@@ -112,22 +124,24 @@ module.exports = async (req, res) => {
         let songs = [];
 
         try {
-            songs = await paxsenixCall(q, limit);
+            songs = await spotsearchCall(q, limit);
         } catch (err) {
-            console.warn("PaxSenix search fallback:", err.message);
+            console.warn("Spotsearch fallback:", err.message);
         }
 
         if (!songs || songs.length === 0) {
             const apiKey = process.env.LASTFM_API_KEY;
-            if (!apiKey) {
-                return res.status(500).json({ error: "Server misconfigured: missing LASTFM_API_KEY" });
+            if (apiKey) {
+                try {
+                    songs = await lastfmSearch(q, limit, apiKey);
+                } catch (err) {
+                    console.warn("Last.fm search fallback failed:", err.message);
+                }
             }
-
-            songs = await lastfmSearch(q, limit, apiKey);
         }
 
         res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=1800");
-        return res.status(200).json({ songs });
+        return res.status(200).json({ songs: songs || [] });
     } catch (err) {
         console.error("search error:", err);
         return res.status(502).json({ error: "Search failed upstream" });

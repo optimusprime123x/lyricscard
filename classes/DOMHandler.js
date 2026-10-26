@@ -232,6 +232,9 @@ class DOMHandler {
         /** @type {AbortController[]} */
         this.lyricsAbortControllers = [];
 
+        /** @type {NoiseButton[]} */
+        this.noiseBorderInstances = [];
+
         /**
          * Below all are DOM elements
          */
@@ -538,6 +541,11 @@ class DOMHandler {
      * Creates song selection DOM elements from Song objects stored in songs variable
      */
     populateSongSelection() {
+        if (this.noiseBorderInstances) {
+            this.noiseBorderInstances.forEach((instance) => instance.destroy());
+            this.noiseBorderInstances = [];
+        }
+
         this.songSelection
             .querySelectorAll(".select-song:not(.cloneable)")
             .forEach((el) => el.remove());
@@ -552,6 +560,22 @@ class DOMHandler {
             clone.querySelector(".authors").textContent = song.artists
                 .map((artist) => artist.name)
                 .join(", ");
+
+            if (song.isMatched) {
+                clone.classList.add("matched-song");
+
+                const badge = document.createElement("div");
+                badge.className = "matched-badge";
+                badge.innerHTML = `<span class="material-symbols-outlined" aria-hidden="true">verified</span><span>Match</span>`;
+                clone.querySelector(".cover-frame").append(badge);
+
+                try {
+                    const noiseBorder = new NoiseButton(clone, { isBorder: true });
+                    this.noiseBorderInstances.push(noiseBorder);
+                } catch (err) {
+                    console.warn("NoiseButton border init failed:", err);
+                }
+            }
 
             clone.addEventListener("click", () => {
                 this.selectedSongIndex = index;
@@ -597,7 +621,7 @@ class DOMHandler {
                         .getSongLyrics(
                             artist,
                             song.name,
-                            index === 0 ? song.spotifyTrackId : null,
+                            song.durationMs || null,
                             controllers[index].signal
                         )
                         .then((lyrics) => {
@@ -635,16 +659,13 @@ class DOMHandler {
     }
 
     /**
-     * Builds provider-aware lyrics loading copy.
+     * Builds lyrics loading copy.
      * @param {Song} song
      * @param {string[]} artists
      * @returns {string}
      */
     getLyricsSearchingText(song, artists) {
-        const providers = song.spotifyTrackId
-            ? "Spotify lyrics, StefDP, and lrclib"
-            : "StefDP and lrclib";
-        return `Checking ${providers} for "${song.name}" by ${artists.join(
+        return `Checking StefDP and lrclib for "${song.name}" by ${artists.join(
             " / "
         )}; using the fastest match...`;
     }

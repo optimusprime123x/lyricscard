@@ -1,7 +1,5 @@
 const LRCLIB_BASE = "https://lrclib.net/api/search";
-const PAXSENIX_LYRICS_BASE = "https://api.paxsenix.org/lyrics/spotify";
 const STEFDP_LYRICS_BASE = "https://lyrics.stefdp.com/lyrics";
-const PAXSENIX_KEY = "sk-paxsenix-y5tK4iuxRPohlXVeF_yC5Uigf7Fr5zS06rzsmMIQ6JAHcH9n";
 const USER_AGENT = "LyricPost/2.0 (https://github.com/optimuspime123/lyricscard)";
 const PROVIDER_TIMEOUT_MS = 9000;
 
@@ -50,40 +48,13 @@ async function firstValidLyrics(providerRequests) {
     }
 }
 
-async function paxsenixLyricsCall(spotifyTrackId, signal) {
-    const url = new URL(PAXSENIX_LYRICS_BASE);
-    url.searchParams.set("id", spotifyTrackId);
-
-    const response = await fetch(url, {
-        signal,
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${PAXSENIX_KEY}`,
-        },
-    });
-
-    if (!response.ok) {
-        throw new Error(`PaxSenix lyrics ${response.status}`);
-    }
-
-    const data = await response.json();
-    if (!data?.ok || (!data.lyrics && !data.plain)) {
-        return null;
-    }
-
-    return {
-        provider: "paxsenix",
-        trackName: null,
-        artistName: null,
-        syncedLyrics: data.lyrics ?? null,
-        plainLyrics: data.plain ?? null,
-    };
-}
-
-async function stefdpLyricsCall(artist, track, signal) {
+async function stefdpLyricsCall(artist, track, durationMs, signal) {
     const url = new URL(STEFDP_LYRICS_BASE);
     url.searchParams.set("artist", artist);
     url.searchParams.set("track", track);
+    if (durationMs) {
+        url.searchParams.set("duration", String(durationMs));
+    }
 
     const response = await fetch(url, {
         signal,
@@ -108,19 +79,33 @@ async function stefdpLyricsCall(artist, track, signal) {
     };
 }
 
-async function lrclibLyricsCall(artist, track, signal) {
-    const url = new URL(LRCLIB_BASE);
-    url.searchParams.set("q", `${artist} ${track}`.trim());
+async function lrclibLyricsCall(artist, track, durationSeconds, signal) {
+    let url = new URL(LRCLIB_BASE);
+    url.searchParams.set("track_name", track);
+    if (artist) url.searchParams.set("artist_name", artist);
+    if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
-    const response = await fetch(url, {
+    let response = await fetch(url, {
         signal,
         headers: { "User-Agent": USER_AGENT },
     });
-    if (!response.ok) {
-        throw new Error(`lrclib lyrics ${response.status}`);
+    let results = response.ok ? await response.json() : null;
+
+    if (!Array.isArray(results) || results.length === 0) {
+        url = new URL(LRCLIB_BASE);
+        url.searchParams.set("q", `${artist} ${track}`.trim());
+        if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
+
+        response = await fetch(url, {
+            signal,
+            headers: { "User-Agent": USER_AGENT },
+        });
+        if (!response.ok) {
+            throw new Error(`lrclib lyrics ${response.status}`);
+        }
+        results = await response.json();
     }
 
-    const results = await response.json();
     if (!Array.isArray(results) || results.length === 0) {
         return null;
     }
@@ -152,40 +137,35 @@ module.exports = async (req, res) => {
 
     const artist = typeof req.query.artist === "string" ? req.query.artist.trim() : "";
     const track = typeof req.query.track === "string" ? req.query.track.trim() : "";
-    const spotifyTrackId =
-        typeof req.query.spotifyTrackId === "string"
-            ? req.query.spotifyTrackId.trim()
-            : typeof req.query.id === "string"
-                ? req.query.id.trim()
-                : "";
+    const rawDuration = req.query.duration || req.query.durationMs || req.query.duration_ms;
+    const durationNum = Number(rawDuration);
 
-    if (!track && !spotifyTrackId) {
+    let durationMs = null;
+    let durationSeconds = null;
+
+    if (Number.isFinite(durationNum) && durationNum > 0) {
+        if (durationNum > 10000) {
+            durationMs = Math.round(durationNum);
+            durationSeconds = Math.round(durationNum / 1000);
+        } else {
+            durationSeconds = Math.round(durationNum);
+            durationMs = Math.round(durationNum * 1000);
+        }
+    }
+
+    if (!track) {
         return res.status(400).json({ error: "Missing 'track' parameter" });
     }
 
     try {
-        const providerRequests = [];
-
-        if (spotifyTrackId) {
-            providerRequests.push(
-                createProviderRequest((signal) =>
-                    paxsenixLyricsCall(spotifyTrackId, signal)
-                )
-            );
-        }
-
-        if (track) {
-            providerRequests.push(
-                createProviderRequest((signal) =>
-                    stefdpLyricsCall(artist, track, signal)
-                )
-            );
-            providerRequests.push(
-                createProviderRequest((signal) =>
-                    lrclibLyricsCall(artist, track, signal)
-                )
-            );
-        }
+        const providerRequests = [
+            createProviderRequest((signal) =>
+                stefdpLyricsCall(artist, track, durationMs, signal)
+            ),
+            createProviderRequest((signal) =>
+                lrclibLyricsCall(artist, track, durationSeconds, signal)
+            ),
+        ];
 
         const lyrics = await firstValidLyrics(providerRequests);
         if (!lyrics) {

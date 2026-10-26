@@ -76,8 +76,8 @@ Then in the Vercel dashboard: **Project → Settings → Environment Variables �
 
 ```
 api/
-  search.js          PaxSenix → Last.fm fallback, returns a normalized song list
-  lyrics.js          races PaxSenix + StefDP + lrclib, returns the first valid hit
+  search.js          Spotsearch → Last.fm fallback, returns a normalized song list
+  lyrics.js          races StefDP + lrclib with duration support, returns the first valid hit
 classes/
   data/              Artist, Lyric, Song models
   DataFetcher.js     thin client for /api/*

@@ -1,6 +1,6 @@
 /**
- * NoiseButton — overlays an animated WebGL chaos-line shader on a button.
- * Designed for "main action" CTAs (the search button + the lyrics FAB).
+ * NoiseButton — overlays an animated WebGL chaos-line shader on a button or card border.
+ * Designed for "main action" CTAs (search button, lyrics FAB) and matched search result cards.
  *
  * Adapted from a Metal-style chaos-button shader (trigonometric FBM noise +
  * two-pass swirling lines). Four color channels (violet / red-orange / green
@@ -8,6 +8,9 @@
  * factor sits between 0.05–0.20 so the first pass nearly vanishes and only
  * a slow background swirl remains; on press, amplitude drops, speed climbs,
  * and the pulse window widens — the button erupts into vivid swirling lines.
+ *
+ * In border mode (isBorder = true), the edge mask is disabled so the vibrant lines
+ * flow continuously around all four borders of the card.
  *
  * Output is premultiplied RGBA so dark areas are transparent and the AMOLED
  * surface beneath shows through.
@@ -22,8 +25,9 @@ const FRAG_SRC = `
 precision mediump float;
 
 uniform vec2  u_resolution;
-uniform float u_time;       // accumulated phase (smooth across speed changes)
-uniform float u_intensity;  // 0 = resting, 1 = active
+uniform float u_time;        // accumulated phase (smooth across speed changes)
+uniform float u_intensity;   // 0 = resting, 1 = active
+uniform float u_border_mode; // 0.0 = button, 1.0 = border
 
 // Trigonometric "swirl" noise — periodic, gives the smooth flowing patterns.
 float noise(vec2 p) {
@@ -96,19 +100,17 @@ void main() {
 
     col = clamp(col, 0.0, 1.0);
 
-    // Edge mask — push the lines toward the top/bottom rims so they
-    // frame the text rather than draw across it. yEdge is 0 at the
-    // vertical center, 1 at the top/bottom rim. At rest the mask is
-    // hard (center fully cleared); on press the floor lifts to ~0.45
-    // so a little overlap bleeds into the text area.
-    float yEdge = abs((gl_FragCoord.y / u_resolution.y) - 0.5) * 2.0;
-    float edgeMask = smoothstep(0.30, 0.80, yEdge);
-    edgeMask = mix(mix(0.0, 0.45, u_intensity), 1.0, edgeMask);
-    col *= edgeMask;
+    // Edge mask — push lines to top/bottom rims for buttons so they frame text.
+    // In border mode (u_border_mode >= 0.5), disable so lines flow around all borders.
+    if (u_border_mode < 0.5) {
+        float yEdge = abs((gl_FragCoord.y / u_resolution.y) - 0.5) * 2.0;
+        float edgeMask = smoothstep(0.30, 0.80, yEdge);
+        edgeMask = mix(mix(0.0, 0.45, u_intensity), 1.0, edgeMask);
+        col *= edgeMask;
+    }
 
     // Premultiplied alpha: brightest channel drives opacity so dark areas
-    // are transparent and the AMOLED surface shows through. Keeping
-    // alpha = max(rgb) preserves the premul invariant (rgb <= alpha).
+    // are transparent and the surface shows through.
     float alpha = max(col.r, max(col.g, col.b));
     gl_FragColor = vec4(col, alpha);
 }
@@ -125,10 +127,14 @@ class NoiseButton {
         });
     }
 
-    constructor(button) {
+    constructor(button, options = {}) {
         this.button = button;
+        this.isBorder = Boolean(options.isBorder || button.dataset.noiseBorder !== undefined);
+
         this.canvas = document.createElement("canvas");
-        this.canvas.className = "noise-canvas";
+        this.canvas.className = this.isBorder
+            ? "noise-canvas noise-border-canvas"
+            : "noise-canvas";
         this.canvas.setAttribute("aria-hidden", "true");
         button.insertBefore(this.canvas, button.firstChild);
 
@@ -144,8 +150,10 @@ class NoiseButton {
         }
         this.gl = gl;
 
-        this.intensity = 0;
-        this.targetIntensity = 0;
+        this.baseIntensity = this.isBorder ? 0.40 : 0;
+        this.intensity = this.baseIntensity;
+        this.targetIntensity = this.baseIntensity;
+
         // phase advances at a rate that depends on the current intensity
         // so fbm motion accelerates smoothly between rest/active.
         this.phase = 0;
@@ -218,6 +226,7 @@ class NoiseButton {
             resolution: gl.getUniformLocation(program, "u_resolution"),
             time: gl.getUniformLocation(program, "u_time"),
             intensity: gl.getUniformLocation(program, "u_intensity"),
+            borderMode: gl.getUniformLocation(program, "u_border_mode"),
         };
         return true;
     }
@@ -239,12 +248,12 @@ class NoiseButton {
             this.targetIntensity = 1;
         };
         const deactivate = () => {
-            this.targetIntensity = 0;
+            this.targetIntensity = this.baseIntensity;
         };
         this.button.addEventListener("mousedown", activate);
         this.button.addEventListener("touchstart", activate, { passive: true });
         this.button.addEventListener("mouseenter", () => {
-            this.targetIntensity = Math.max(this.targetIntensity, 0.45);
+            this.targetIntensity = Math.max(this.targetIntensity, this.isBorder ? 0.90 : 0.45);
         });
         this.button.addEventListener("mouseup", deactivate);
         this.button.addEventListener("mouseleave", deactivate);
@@ -262,6 +271,7 @@ class NoiseButton {
     #draw() {
         this.gl.uniform1f(this.uniforms.time, this.phase);
         this.gl.uniform1f(this.uniforms.intensity, this.intensity);
+        this.gl.uniform1f(this.uniforms.borderMode, this.isBorder ? 1.0 : 0.0);
         this.gl.drawArrays(this.gl.TRIANGLE_STRIP, 0, 4);
     }
 

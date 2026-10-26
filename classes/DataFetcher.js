@@ -5,7 +5,7 @@ class DataFetcher {
     }
 
     /**
-     * Searches for songs via the backend, which proxies PaxSenix and Last.fm.
+     * Searches for songs via the backend, which proxies Spotsearch and Last.fm.
      *
      * @param {string} name
      * @param {number} limit
@@ -22,16 +22,19 @@ class DataFetcher {
     }
 
     /**
-     * Searches for song lyrics via the backend, which proxies PaxSenix, StefDP, and lrclib.
+     * Searches for song lyrics via the backend, which proxies StefDP and lrclib.
      *
      * @param {string} artistName
      * @param {string} trackName
-     * @param {string|null} spotifyTrackId
+     * @param {number|null} duration Duration in ms (or seconds) from search result
+     * @param {AbortSignal|null} signal
      * @returns {Promise<object|null>} a lyrics object compatible with Song.loadLyrics
      */
-    async getSongLyrics(artistName, trackName, spotifyTrackId = null, signal = null) {
+    async getSongLyrics(artistName, trackName, duration = null, signal = null) {
         const params = new URLSearchParams({ artist: artistName, track: trackName });
-        if (spotifyTrackId) params.set("spotifyTrackId", spotifyTrackId);
+        if (duration !== null && duration !== undefined && duration > 0) {
+            params.set("duration", String(duration));
+        }
 
         const url = `${this.apiBase}/lyrics?${params.toString()}`;
         const response = await fetch(url, signal ? { signal } : undefined);
