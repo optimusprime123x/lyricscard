@@ -1,7 +1,9 @@
-const LRCLIB_BASE = "https://lrclib.net/api/search";
+const LRCLIB_GET_BASE = "https://lrclib.net/api/get";
+const LRCLIB_SEARCH_BASE = "https://lrclib.net/api/search";
 const STEFDP_LYRICS_BASE = "https://lyrics.stefdp.com/lyrics";
 const USER_AGENT = "LyricPost/2.0 (https://github.com/optimuspime123/lyricscard)";
 const PROVIDER_TIMEOUT_MS = 9000;
+const RETRY_DELAY_MS = 500;
 
 function formatSyncedLine(time, text) {
     const totalSeconds = Number(time);
@@ -18,37 +20,25 @@ function normalizeLyrics(payload) {
     return payload;
 }
 
-function createProviderRequest(providerCall) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
-
-    return {
-        controller,
-        promise: providerCall(controller.signal).finally(() => clearTimeout(timeout)),
-    };
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function firstValidLyrics(providerRequests) {
-    if (providerRequests.length === 0) return null;
-
+async function timedFetch(url, options = {}, timeoutMs = PROVIDER_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        return await Promise.any(
-            providerRequests.map(({ promise }) =>
-                promise.then((lyrics) => {
-                    const normalized = normalizeLyrics(lyrics);
-                    if (!normalized) throw new Error("No lyrics found");
-                    return normalized;
-                })
-            )
-        );
-    } catch {
-        return null;
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+        });
+        return response;
     } finally {
-        providerRequests.forEach(({ controller }) => controller.abort());
+        clearTimeout(timer);
     }
 }
 
-async function stefdpLyricsCall(artist, track, durationMs, signal) {
+async function stefdpLyricsCall(artist, track, durationMs) {
     const url = new URL(STEFDP_LYRICS_BASE);
     url.searchParams.set("artist", artist);
     url.searchParams.set("track", track);
@@ -56,8 +46,7 @@ async function stefdpLyricsCall(artist, track, durationMs, signal) {
         url.searchParams.set("duration", String(durationMs));
     }
 
-    const response = await fetch(url, {
-        signal,
+    const response = await timedFetch(url, {
         headers: { "User-Agent": USER_AGENT },
     });
     if (!response.ok) {
@@ -70,38 +59,72 @@ async function stefdpLyricsCall(artist, track, durationMs, signal) {
         ? lineSynced.map((line) => formatSyncedLine(line.time, line.text)).filter(Boolean).join("\n")
         : null;
 
-    return {
+    return normalizeLyrics({
         provider: "stefdp",
         trackName: track,
         artistName: artist,
         syncedLyrics: syncedLyrics || null,
         plainLyrics: data?.lyrics?.plain?.lyrics ?? null,
-    };
+    });
 }
 
-async function lrclibLyricsCall(artist, track, durationSeconds, signal) {
-    let url = new URL(LRCLIB_BASE);
+async function lrclibGetCall(artist, track, durationSeconds) {
+    if (!track) return null;
+    const url = new URL(LRCLIB_GET_BASE);
     url.searchParams.set("track_name", track);
     if (artist) url.searchParams.set("artist_name", artist);
     if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
-    let response = await fetch(url, {
-        signal,
+    const response = await timedFetch(url, {
         headers: { "User-Agent": USER_AGENT },
     });
-    let results = response.ok ? await response.json() : null;
+
+    if (response.status === 404) {
+        return null;
+    }
+
+    if (!response.ok) {
+        throw new Error(`lrclib get ${response.status}`);
+    }
+
+    const data = await response.json();
+    return normalizeLyrics({
+        provider: "lrclib",
+        trackName: data.trackName ?? track,
+        artistName: data.artistName ?? artist,
+        syncedLyrics: data.syncedLyrics ?? null,
+        plainLyrics: data.plainLyrics ?? null,
+    });
+}
+
+async function lrclibSearchCall(artist, track, durationSeconds) {
+    let url = new URL(LRCLIB_SEARCH_BASE);
+    url.searchParams.set("track_name", track);
+    if (artist) url.searchParams.set("artist_name", artist);
+    if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
+
+    let response = await timedFetch(url, {
+        headers: { "User-Agent": USER_AGENT },
+    });
+
+    let results = null;
+    if (response.ok) {
+        results = await response.json();
+    } else if (response.status !== 404) {
+        throw new Error(`lrclib search ${response.status}`);
+    }
 
     if (!Array.isArray(results) || results.length === 0) {
-        url = new URL(LRCLIB_BASE);
+        url = new URL(LRCLIB_SEARCH_BASE);
         url.searchParams.set("q", `${artist} ${track}`.trim());
         if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
-        response = await fetch(url, {
-            signal,
+        response = await timedFetch(url, {
             headers: { "User-Agent": USER_AGENT },
         });
+
         if (!response.ok) {
-            throw new Error(`lrclib lyrics ${response.status}`);
+            throw new Error(`lrclib search fallback ${response.status}`);
         }
         results = await response.json();
     }
@@ -120,13 +143,22 @@ async function lrclibLyricsCall(artist, track, durationSeconds, signal) {
         return null;
     }
 
-    return {
+    return normalizeLyrics({
         provider: "lrclib",
         trackName: chosen.trackName ?? null,
         artistName: chosen.artistName ?? null,
         syncedLyrics: chosen.syncedLyrics ?? null,
         plainLyrics: chosen.plainLyrics ?? null,
-    };
+    });
+}
+
+async function lrclibLyricsCall(artist, track, durationSeconds) {
+    // 1. Try exact /api/get lookup first
+    const directMatch = await lrclibGetCall(artist, track, durationSeconds);
+    if (directMatch) return directMatch;
+
+    // 2. Fall back to /api/search if /api/get returned 404 or had no lyrics
+    return await lrclibSearchCall(artist, track, durationSeconds);
 }
 
 module.exports = async (req, res) => {
@@ -158,16 +190,51 @@ module.exports = async (req, res) => {
     }
 
     try {
-        const providerRequests = [
-            createProviderRequest((signal) =>
-                stefdpLyricsCall(artist, track, durationMs, signal)
-            ),
-            createProviderRequest((signal) =>
-                lrclibLyricsCall(artist, track, durationSeconds, signal)
-            ),
-        ];
+        let lyrics = null;
+        let lrclibError = null;
+        let lrclibFailedAt = null;
 
-        const lyrics = await firstValidLyrics(providerRequests);
+        // 1. Try LRCLIB first (/api/get then /api/search)
+        try {
+            lyrics = await lrclibLyricsCall(artist, track, durationSeconds);
+        } catch (err) {
+            lrclibError = err;
+            lrclibFailedAt = Date.now();
+        }
+
+        // 2. If LRCLIB succeeded and returned valid lyrics, return them
+        if (lyrics) {
+            res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
+            return res.status(200).json(lyrics);
+        }
+
+        // 3. If LRCLIB errored or found nothing, try StefDP
+        try {
+            lyrics = await stefdpLyricsCall(artist, track, durationMs);
+        } catch {
+            // StefDP failed (e.g. Cloudflare challenge or network error)
+        }
+
+        if (lyrics) {
+            res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
+            return res.status(200).json(lyrics);
+        }
+
+        // 4. If LRCLIB previously errored (e.g. 503/429/network), retry LRCLIB once.
+        // Wait remainder of 500ms if needed.
+        if (lrclibError) {
+            const elapsed = Date.now() - lrclibFailedAt;
+            if (elapsed < RETRY_DELAY_MS) {
+                await sleep(RETRY_DELAY_MS - elapsed);
+            }
+
+            try {
+                lyrics = await lrclibLyricsCall(artist, track, durationSeconds);
+            } catch (err) {
+                console.warn("lrclib retry failed:", err.message);
+            }
+        }
+
         if (!lyrics) {
             return res.status(404).json({ error: "No lyrics found" });
         }
