@@ -625,7 +625,7 @@ class DOMHandler {
 
         try {
             this.displaySearching(this.getLyricsSearchingText(song, artists), {
-                countdownSeconds: 9,
+                countdownSeconds: 20,
             });
 
             const lyrics = await Promise.any(
@@ -1440,7 +1440,7 @@ class DOMHandler {
     /**
      * Renders a live countdown beneath the active searching message until it
      * reaches zero (or until cleared). The lyrics-fetch path uses this to
-     * surface the per-provider timeout (9s) so the user knows how long until
+     * surface the lyrics lookup timeout so the user knows how long until
      * they should expect a result or a no-lyrics-found fallback.
      * @param {number} seconds
      */
