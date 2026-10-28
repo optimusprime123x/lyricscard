@@ -264,6 +264,10 @@ class DOMHandler {
         this.songInfoName = document.querySelector(".song-info-name");
         /** @type {Element} */
         this.songInfoArtist = document.querySelector(".song-info-artist");
+        /** @type {Element|null} */
+        this.songPreviewBtn = document.querySelector(".song-preview-btn");
+        /** @type {HTMLAudioElement|null} */
+        this.previewAudio = null;
         /** @type {Element} */
         this.goToFinal = document.querySelector(
             ".lyrics-image-screen .go-to-screen.right"
@@ -377,6 +381,12 @@ class DOMHandler {
         this.lyricsFab.addEventListener("click", () => {
             this.displaySongImage();
         });
+
+        if (this.songPreviewBtn) {
+            this.songPreviewBtn.addEventListener("click", () => {
+                this.toggleSongPreview();
+            });
+        }
 
         this.customColorInput.addEventListener("input", () => {
             this.userPickedColor = true;
@@ -571,6 +581,20 @@ class DOMHandler {
                 .map((artist) => artist.name)
                 .join(", ");
 
+            const explicitBadge = clone.querySelector(".explicit-badge");
+            if (explicitBadge) {
+                if (song.isExplicit) {
+                    explicitBadge.classList.remove("hidden");
+                } else {
+                    explicitBadge.classList.add("hidden");
+                }
+            }
+
+            const releaseDateEl = clone.querySelector(".release-date");
+            if (releaseDateEl) {
+                releaseDateEl.textContent = song.releaseDate || "";
+            }
+
             if (song.isMatched) {
                 clone.classList.add("matched-song");
 
@@ -635,7 +659,8 @@ class DOMHandler {
                             artist,
                             song.name,
                             song.durationMs || null,
-                            controllers[index].signal
+                            controllers[index].signal,
+                            song.isrc || null
                         )
                         .then((lyrics) => {
                             if (!lyrics) throw Error("Lyrics not found");
@@ -678,7 +703,7 @@ class DOMHandler {
      * @returns {string}
      */
     getLyricsSearchingText(song, artists) {
-        return `Checking StefDP and lrclib for "${song.name}" by ${artists.join(
+        return `Checking lrc.red, lrclib and StefDP for "${song.name}" by ${artists.join(
             " / "
         )}; using the fastest match...`;
     }
@@ -694,6 +719,95 @@ class DOMHandler {
         this.songInfoArtist.textContent = song.artists
             .map((artist) => artist.name)
             .join(", ");
+
+        this.setupSongPreview(song);
+    }
+
+    /**
+     * Prepares the audio preview player for the chosen song on screen 3.
+     * @param {Song} song
+     */
+    setupSongPreview(song) {
+        this.stopSongPreview();
+
+        if (!this.songPreviewBtn) return;
+
+        if (!song?.previewUrl) {
+            this.songPreviewBtn.classList.add("hidden");
+            return;
+        }
+
+        this.songPreviewBtn.classList.remove("hidden");
+        this.updatePreviewBtnState(false);
+    }
+
+    /**
+     * Toggles 30-second audio preview playback.
+     */
+    toggleSongPreview() {
+        const song = this.songs[this.selectedSongIndex];
+        if (!song?.previewUrl) return;
+
+        if (this.previewAudio && !this.previewAudio.paused) {
+            this.stopSongPreview();
+            return;
+        }
+
+        if (!this.previewAudio || this.previewAudio.src !== song.previewUrl) {
+            if (this.previewAudio) {
+                this.previewAudio.pause();
+            }
+            this.previewAudio = new Audio(song.previewUrl);
+            this.previewAudio.addEventListener("ended", () => {
+                this.updatePreviewBtnState(false);
+            });
+            this.previewAudio.addEventListener("pause", () => {
+                this.updatePreviewBtnState(false);
+            });
+            this.previewAudio.addEventListener("play", () => {
+                this.updatePreviewBtnState(true);
+            });
+            this.previewAudio.addEventListener("error", (e) => {
+                console.warn("Audio preview playback failed:", e);
+                this.updatePreviewBtnState(false);
+            });
+        }
+
+        this.previewAudio.play().catch((err) => {
+            console.warn("Audio preview play failed:", err);
+            this.updatePreviewBtnState(false);
+        });
+    }
+
+    /**
+     * Stops audio preview playback if playing.
+     */
+    stopSongPreview() {
+        if (this.previewAudio) {
+            this.previewAudio.pause();
+            this.previewAudio.currentTime = 0;
+        }
+        this.updatePreviewBtnState(false);
+    }
+
+    /**
+     * Updates preview button UI icon and active styles.
+     * @param {boolean} isPlaying
+     */
+    updatePreviewBtnState(isPlaying) {
+        if (!this.songPreviewBtn) return;
+        const icon = this.songPreviewBtn.querySelector(".preview-icon");
+        if (isPlaying) {
+            this.songPreviewBtn.classList.add("is-playing");
+            this.songPreviewBtn.setAttribute("aria-label", "Pause preview");
+            this.songPreviewBtn.setAttribute("title", "Pause preview");
+            if (icon) icon.textContent = "pause";
+        } else {
+            this.songPreviewBtn.classList.remove("is-playing");
+            this.songPreviewBtn.setAttribute("aria-label", "Play 30-second preview");
+            this.songPreviewBtn.setAttribute("title", "Play 30-second preview");
+            if (icon) icon.textContent = "play_arrow";
+        }
     }
 
     /**
@@ -1492,6 +1606,10 @@ class DOMHandler {
      * @param {number} number
      */
     displayScreen(number) {
+        if (number !== 3) {
+            this.stopSongPreview();
+        }
+
         this.screens.forEach((screen) => {
             if (Number(screen.dataset.number) < number) {
                 screen.classList.add("hidden");

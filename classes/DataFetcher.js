@@ -22,18 +22,22 @@ class DataFetcher {
     }
 
     /**
-     * Searches for song lyrics via the backend, which proxies StefDP and lrclib.
+     * Searches for song lyrics via the backend, which proxies lrc.red, lrclib, and StefDP.
      *
      * @param {string} artistName
      * @param {string} trackName
      * @param {number|null} duration Duration in ms (or seconds) from search result
      * @param {AbortSignal|null} signal
+     * @param {string|null} isrc
      * @returns {Promise<object|null>} a lyrics object compatible with Song.loadLyrics
      */
-    async getSongLyrics(artistName, trackName, duration = null, signal = null) {
+    async getSongLyrics(artistName, trackName, duration = null, signal = null, isrc = null) {
         const params = new URLSearchParams({ artist: artistName, track: trackName });
         if (duration !== null && duration !== undefined && duration > 0) {
             params.set("duration", String(duration));
+        }
+        if (isrc) {
+            params.set("isrc", String(isrc).trim());
         }
 
         const url = `${this.apiBase}/lyrics?${params.toString()}`;

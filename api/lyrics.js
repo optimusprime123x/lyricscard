@@ -1,3 +1,4 @@
+const LRC_RED_BASE = "https://lrc.red";
 const LRCLIB_GET_BASE = "https://lrclib.net/api/get";
 const LRCLIB_SEARCH_BASE = "https://lrclib.net/api/search";
 const STEFDP_LYRICS_BASE = "https://lyrics.stefdp.com/lyrics";
@@ -15,6 +16,37 @@ function formatSyncedLine(time, text) {
     return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}]${text}`;
 }
 
+function parseLrc(rawLrc) {
+    if (!rawLrc || typeof rawLrc !== "string") return null;
+    const lines = rawLrc.split(/\r?\n/);
+    const syncedLines = [];
+    const plainLines = [];
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        // Strip non-lyric metadata lines like [ti:...], [ar:...], [al:...], [length:...]
+        if (/^\[[a-zA-Z]+:[^\]]*\]/.test(line)) continue;
+
+        const match = line.match(/^(\[\d{2}:\d{2}(?:\.\d+)?\])(.*)$/);
+        if (match) {
+            const timeTag = match[1];
+            // Remove word-sync tags like <00:27.40>
+            const text = match[2].replace(/<[^>]+>/g, "").trim();
+            if (text) {
+                syncedLines.push(`${timeTag} ${text}`);
+                plainLines.push(text);
+            }
+        }
+    }
+
+    if (syncedLines.length === 0) return null;
+    return {
+        syncedLyrics: syncedLines.join("\n"),
+        plainLyrics: plainLines.join("\n"),
+    };
+}
+
 function normalizeLyrics(payload) {
     if (!payload?.syncedLyrics && !payload?.plainLyrics) return null;
     return payload;
@@ -27,18 +59,59 @@ function sleep(ms) {
 async function timedFetch(url, options = {}, timeoutMs = PROVIDER_TIMEOUT_MS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    const externalSignal = options.signal;
+    if (externalSignal?.aborted) {
+        clearTimeout(timer);
+        throw new Error("Aborted");
+    }
+
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+
     try {
-        const response = await fetch(url, {
-            ...options,
-            signal: controller.signal,
-        });
-        return response;
+        const fetchOptions = { ...options, signal: controller.signal };
+        return await fetch(url, fetchOptions);
     } finally {
         clearTimeout(timer);
+        if (externalSignal) {
+            externalSignal.removeEventListener("abort", onExternalAbort);
+        }
     }
 }
 
-async function stefdpLyricsCall(artist, track, durationMs) {
+async function lrcRedLyricsCall(isrc, artist, track, signal) {
+    if (!isrc) return null;
+    const url = `${LRC_RED_BASE}/s/${encodeURIComponent(isrc)}.lrc`;
+    const response = await timedFetch(url, {
+        signal,
+        headers: { "User-Agent": USER_AGENT },
+    });
+
+    if (response.status === 404) {
+        return null;
+    }
+
+    if (!response.ok) {
+        throw new Error(`lrc.red lyrics ${response.status}`);
+    }
+
+    const raw = await response.text();
+    const parsed = parseLrc(raw);
+    if (!parsed) return null;
+
+    return normalizeLyrics({
+        provider: "lrc.red",
+        trackName: track || null,
+        artistName: artist || null,
+        syncedLyrics: parsed.syncedLyrics,
+        plainLyrics: parsed.plainLyrics,
+    });
+}
+
+async function stefdpLyricsCall(artist, track, durationMs, signal) {
     const url = new URL(STEFDP_LYRICS_BASE);
     url.searchParams.set("artist", artist);
     url.searchParams.set("track", track);
@@ -47,6 +120,7 @@ async function stefdpLyricsCall(artist, track, durationMs) {
     }
 
     const response = await timedFetch(url, {
+        signal,
         headers: { "User-Agent": USER_AGENT },
     });
     if (!response.ok) {
@@ -68,7 +142,7 @@ async function stefdpLyricsCall(artist, track, durationMs) {
     });
 }
 
-async function lrclibGetCall(artist, track, durationSeconds) {
+async function lrclibGetCall(artist, track, durationSeconds, signal) {
     if (!track) return null;
     const url = new URL(LRCLIB_GET_BASE);
     url.searchParams.set("track_name", track);
@@ -76,6 +150,7 @@ async function lrclibGetCall(artist, track, durationSeconds) {
     if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
     const response = await timedFetch(url, {
+        signal,
         headers: { "User-Agent": USER_AGENT },
     });
 
@@ -97,13 +172,14 @@ async function lrclibGetCall(artist, track, durationSeconds) {
     });
 }
 
-async function lrclibSearchCall(artist, track, durationSeconds) {
+async function lrclibSearchCall(artist, track, durationSeconds, signal) {
     let url = new URL(LRCLIB_SEARCH_BASE);
     url.searchParams.set("track_name", track);
     if (artist) url.searchParams.set("artist_name", artist);
     if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
     let response = await timedFetch(url, {
+        signal,
         headers: { "User-Agent": USER_AGENT },
     });
 
@@ -120,6 +196,7 @@ async function lrclibSearchCall(artist, track, durationSeconds) {
         if (durationSeconds) url.searchParams.set("duration", String(durationSeconds));
 
         response = await timedFetch(url, {
+            signal,
             headers: { "User-Agent": USER_AGENT },
         });
 
@@ -152,13 +229,46 @@ async function lrclibSearchCall(artist, track, durationSeconds) {
     });
 }
 
-async function lrclibLyricsCall(artist, track, durationSeconds) {
+async function lrclibLyricsCall(artist, track, durationSeconds, signal) {
     // 1. Try exact /api/get lookup first
-    const directMatch = await lrclibGetCall(artist, track, durationSeconds);
+    const directMatch = await lrclibGetCall(artist, track, durationSeconds, signal);
     if (directMatch) return directMatch;
 
     // 2. Fall back to /api/search if /api/get returned 404 or had no lyrics
-    return await lrclibSearchCall(artist, track, durationSeconds);
+    return await lrclibSearchCall(artist, track, durationSeconds, signal);
+}
+
+async function raceFirstValidLyrics(tasks) {
+    if (tasks.length === 0) return null;
+    if (tasks.length === 1) {
+        try {
+            return await tasks[0]();
+        } catch {
+            return null;
+        }
+    }
+
+    const controllers = tasks.map(() => new AbortController());
+    try {
+        const winner = await Promise.any(
+            tasks.map((task, index) =>
+                task(controllers[index].signal).then((result) => {
+                    const valid = normalizeLyrics(result);
+                    if (!valid) throw new Error("No lyrics");
+                    // First valid response cancels other running requests
+                    controllers.forEach((c, i) => {
+                        if (i !== index) c.abort();
+                    });
+                    return valid;
+                })
+            )
+        );
+        return winner;
+    } catch {
+        return null;
+    } finally {
+        controllers.forEach((c) => c.abort());
+    }
 }
 
 module.exports = async (req, res) => {
@@ -169,6 +279,7 @@ module.exports = async (req, res) => {
 
     const artist = typeof req.query.artist === "string" ? req.query.artist.trim() : "";
     const track = typeof req.query.track === "string" ? req.query.track.trim() : "";
+    const isrc = typeof req.query.isrc === "string" ? req.query.isrc.trim() : "";
     const rawDuration = req.query.duration || req.query.durationMs || req.query.duration_ms;
     const durationNum = Number(rawDuration);
 
@@ -194,21 +305,41 @@ module.exports = async (req, res) => {
         let lrclibError = null;
         let lrclibFailedAt = null;
 
-        // 1. Try LRCLIB first (/api/get then /api/search)
-        try {
-            lyrics = await lrclibLyricsCall(artist, track, durationSeconds);
-        } catch (err) {
-            lrclibError = err;
-            lrclibFailedAt = Date.now();
+        const lrclibTask = async (signal) => {
+            try {
+                return await lrclibLyricsCall(artist, track, durationSeconds, signal);
+            } catch (err) {
+                if (!signal?.aborted) {
+                    lrclibError = err;
+                    lrclibFailedAt = Date.now();
+                }
+                throw err;
+            }
+        };
+
+        // 1. If we have ISRC, run lrc.red and lrclib1 concurrently.
+        // First valid response cancels the other and wins!
+        if (isrc) {
+            const lrcRedTask = async (signal) => {
+                return await lrcRedLyricsCall(isrc, artist, track, signal);
+            };
+
+            lyrics = await raceFirstValidLyrics([lrcRedTask, lrclibTask]);
+        } else {
+            try {
+                lyrics = await lrclibTask();
+            } catch {
+                // Handled in lrclibTask
+            }
         }
 
-        // 2. If LRCLIB succeeded and returned valid lyrics, return them
+        // If either lrc.red or lrclib1 returned valid lyrics, return them
         if (lyrics) {
             res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
             return res.status(200).json(lyrics);
         }
 
-        // 3. If LRCLIB errored or found nothing, try StefDP
+        // 2. If both (or lrclib1) failed, try StefDP
         try {
             lyrics = await stefdpLyricsCall(artist, track, durationMs);
         } catch {
@@ -220,7 +351,7 @@ module.exports = async (req, res) => {
             return res.status(200).json(lyrics);
         }
 
-        // 4. If LRCLIB previously errored (e.g. 503/429/network), retry LRCLIB once.
+        // 3. If lrclib1 previously errored (e.g. 503/429/network), retry lrclib2 once.
         // Wait remainder of 500ms if needed.
         if (lrclibError) {
             const elapsed = Date.now() - lrclibFailedAt;

@@ -25,6 +25,18 @@ class Song {
         /** @type {boolean} */
         this.isMatched = Boolean(songInfo.isMatched);
 
+        /** @type {string|null} */
+        this.isrc = songInfo.isrc ?? null;
+
+        /** @type {string|null} */
+        this.releaseDate = songInfo.releaseDate ?? null;
+
+        /** @type {boolean} */
+        this.isExplicit = Boolean(songInfo.isExplicit);
+
+        /** @type {string|null} */
+        this.previewUrl = songInfo.previewUrl ?? null;
+
         /** @type {boolean} */
         this.hasSyncedLyrics = lyrics?.syncedLyrics ? true : false;
 

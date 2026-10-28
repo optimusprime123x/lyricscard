@@ -55,6 +55,10 @@ async function spotsearchCall(query, limit) {
             })),
             albumCoverUrl: track.album_art_url || null,
             album: track.album || null,
+            isrc: track.isrc || null,
+            releaseDate: track.release_date || null,
+            isExplicit: Boolean(track.is_explicit),
+            previewUrl: track.preview_url || null,
             isMatched: Boolean(isMatched && matchedTrackId && trackId === matchedTrackId),
         };
     });
@@ -81,6 +85,11 @@ async function lastfmSearch(query, limit, apiKey) {
                     durationMs: track.duration ? Number(track.duration) : 0,
                     artists: track.artist?.name ? [{ name: track.artist.name }] : [],
                     albumCoverUrl: pickAlbumCover(track.album?.image),
+                    album: track.album?.title || null,
+                    isrc: null,
+                    releaseDate: null,
+                    isExplicit: false,
+                    previewUrl: null,
                     isMatched: false,
                 };
             } catch {
