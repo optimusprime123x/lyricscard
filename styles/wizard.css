@@ -404,6 +404,10 @@
     letter-spacing: -0.02em;
 }
 
+.explicit-badge.hidden {
+    display: none !important;
+}
+
 .dark-mode .explicit-badge {
     background: rgba(255, 255, 255, 0.25);
     color: #ffffff;
@@ -511,6 +515,10 @@
         transform var(--motion-spatial-fast),
         background var(--motion-effects-fast),
         box-shadow var(--motion-effects-fast);
+}
+
+.song-preview-btn.hidden {
+    display: none !important;
 }
 
 .song-preview-btn:hover {

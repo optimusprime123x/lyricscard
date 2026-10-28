@@ -586,7 +586,7 @@ class DOMHandler {
                 if (song.isExplicit) {
                     explicitBadge.classList.remove("hidden");
                 } else {
-                    explicitBadge.classList.add("hidden");
+                    explicitBadge.remove();
                 }
             }
 
